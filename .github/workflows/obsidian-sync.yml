@@ -1,0 +1,171 @@
+name: Obsidian Sync Upstream
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: obsidian-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+      sha: ${{ steps.push.outputs.sha }}
+    steps:
+      # SYNC_TOKEN is an optional PAT with `workflow` scope. GITHUB_TOKEN cannot push commits that touch
+      # .github/workflows/*, which an upstream merge may contain.
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream Canvas
+        run: |
+          git remote add upstream https://github.com/CraftCanvasMC/Canvas.git
+          git fetch --no-tags upstream main
+
+      # Must run before any Gradle step: the script requires a clean tree.
+      - name: Merge newest stable upstream commit
+        id: merge
+        run: |
+          rc=0
+          bash scripts/obsidian/merge-upstream.sh upstream/main || rc=$?
+          # 0 = up-to-date/merged, 2 = conflict (handled by the final step); anything else is a real error.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+            exit "$rc"
+          fi
+
+      - name: Set up Java 25
+        if: steps.merge.outputs.status == 'merged'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        if: steps.merge.outputs.status == 'merged'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Apply all patches
+        id: apply
+        if: steps.merge.outputs.status == 'merged'
+        run: ./gradlew applyAllPatches
+
+      - name: Rebuild patches
+        id: rebuild
+        if: steps.merge.outputs.status == 'merged'
+        env:
+          SHORT: ${{ steps.merge.outputs.short }}
+        run: |
+          ./gradlew \
+            rebuildAllServerPatches \
+            rebuildPaperApiPatches \
+            rebuildPaperSingleFilePatches
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore: rebuild patches after Canvas $SHORT"
+          fi
+
+      - name: Run tests
+        id: test
+        if: steps.merge.outputs.status == 'merged'
+        run: ./gradlew test
+
+      - name: Build Paperclip jar
+        id: paperclip
+        if: steps.merge.outputs.status == 'merged'
+        run: ./gradlew :canvas-server:createPaperclipJar
+
+      # Plain (never forced) push of main. A rejection is not fatal here: it sets pushed=false and the
+      # final step falls back to the PR path.
+      - name: Push main
+        id: push
+        if: steps.merge.outputs.status == 'merged'
+        run: |
+          if git push origin main; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Conflict, failed verification, or rejected push: park the merge on upstream-sync/<short>, open a PR
+      # (unless one is already open) and fail the job so the user is notified. main is never force-pushed.
+      - name: Open sync PR
+        if: ${{ always() && (steps.merge.outputs.status == 'conflict' || steps.push.outputs.pushed == 'false' || (failure() && steps.merge.outputs.status == 'merged')) }}
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          STATUS: ${{ steps.merge.outputs.status }}
+          SHORT: ${{ steps.merge.outputs.short }}
+          MC: ${{ steps.merge.outputs.mc }}
+          SHA: ${{ steps.merge.outputs.sha }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          OUT_APPLY: ${{ steps.apply.outcome }}
+          OUT_REBUILD: ${{ steps.rebuild.outcome }}
+          OUT_TEST: ${{ steps.test.outcome }}
+          OUT_PAPERCLIP: ${{ steps.paperclip.outcome }}
+        run: |
+          set -euo pipefail
+          branch="upstream-sync/$SHORT"
+
+          if [ "$STATUS" = "conflict" ]; then
+            # merge-upstream.sh already created this local branch holding the conflicted merge commit.
+            reason="The merge of Canvas $SHA produced **merge conflicts**. The branch contains the conflicted merge commit; resolve the conflicts on it and merge the PR."
+          elif [ "$PUSHED" = "false" ]; then
+            git branch -f "$branch" HEAD
+            reason="Verification passed, but pushing the merge to \`main\` was rejected. This usually means the upstream changes touch \`.github/workflows/*\`, which \`GITHUB_TOKEN\` may not push. Add a \`SYNC_TOKEN\` repository secret (a PAT with \`workflow\` scope) for automatic syncs, or review and merge this PR manually."
+          else
+            git branch -f "$branch" HEAD
+            failed="an earlier step"
+            [ "$OUT_APPLY" = "failure" ] && failed="Apply all patches"
+            [ "$OUT_REBUILD" = "failure" ] && failed="Rebuild patches"
+            [ "$OUT_TEST" = "failure" ] && failed="Run tests"
+            [ "$OUT_PAPERCLIP" = "failure" ] && failed="Build Paperclip jar"
+            reason="The merge of Canvas $SHA applied cleanly, but verification failed at: **$failed**. \`main\` was left untouched."
+          fi
+
+          # upstream-sync/* is a bot-owned scratch branch that may linger from an earlier run, so a force
+          # push is acceptable here. main is never force-pushed.
+          git push --force origin "refs/heads/$branch:refs/heads/$branch"
+
+          existing="$(gh pr list --head "$branch" --state open --json number --jq 'length')"
+          if [ "$existing" -eq 0 ]; then
+            printf 'Automated upstream sync of Canvas `%s` (Minecraft %s).\n\n%s\n' "$SHORT" "$MC" "$reason" > "$RUNNER_TEMP/pr-body.md"
+            gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "Sync Canvas $SHORT ($MC)" \
+              --body-file "$RUNNER_TEMP/pr-body.md"
+          else
+            echo "An open PR for $branch already exists."
+          fi
+
+          echo "::error::Upstream sync of Canvas $SHORT needs manual attention (see the PR from $branch)."
+          exit 1
+
+  build:
+    needs: sync
+    if: ${{ needs.sync.outputs.pushed == 'true' }}
+    # Pushes made with GITHUB_TOKEN do not trigger other workflows, so build and release explicitly.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/obsidian-build.yml
+    with:
+      ref: ${{ needs.sync.outputs.sha }}
+      release: true

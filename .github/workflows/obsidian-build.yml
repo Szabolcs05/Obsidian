@@ -1,0 +1,109 @@
+name: Obsidian Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to build (defaults to the triggering sha). The sync workflow passes the sha it just pushed."
+        type: string
+        required: false
+        default: ""
+      release:
+        description: "Publish a GitHub release for this build (only ever used for builds of main)."
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write # needed by the release step; pull_request runs from forks get a read-only token regardless
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # In a workflow_call the default sha is the caller's PRE-merge commit, hence the explicit ref.
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Test sync scripts
+        run: |
+          bash scripts/obsidian/tests/test-find-stable.sh
+          bash scripts/obsidian/tests/test-merge-upstream.sh
+
+      - name: Apply all patches
+        run: ./gradlew applyAllPatches
+
+      - name: Rebuild patches
+        run: |
+          ./gradlew \
+            rebuildAllServerPatches \
+            rebuildPaperApiPatches \
+            rebuildPaperSingleFilePatches
+
+      - name: Check rebuilt patches have no changes
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+
+      - name: Run tests
+        run: ./gradlew test
+
+      - name: Build Paperclip jar
+        run: ./gradlew :canvas-server:createPaperclipJar
+
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obsidian-paperclip
+          path: canvas-server/build/libs/obsidian-paperclip-*.jar
+          if-no-files-found: error
+
+      # Releases only for builds of main: a push to main, or the sync workflow calling us with release=true
+      # after it pushed main. Never for pull requests.
+      - name: Publish release
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name != 'pull_request' && inputs.release == true) }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mc="$(tr -d '\r' < gradle.properties | sed -n 's/^mcVersion[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1/p' | head -n1)"
+          full="$(git rev-parse HEAD)"
+          short="$(git rev-parse --short=7 HEAD)"
+          tag="${mc}-${short}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; skipping."
+            exit 0
+          fi
+          shopt -s nullglob
+          jars=(canvas-server/build/libs/obsidian-paperclip-*.jar)
+          if [ "${#jars[@]}" -eq 0 ]; then
+            echo "error: no paperclip jar found" >&2
+            exit 1
+          fi
+          gh release create "$tag" "${jars[@]}" \
+            --target "$full" \
+            --title "Obsidian $tag" \
+            --notes "Automated build of $full (Minecraft $mc), run ${{ github.run_number }}."
