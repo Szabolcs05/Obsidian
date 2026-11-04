@@ -115,3 +115,5 @@ subprojects {
 tasks.register("fixupMinecraftFilePatches") {
     dependsOn(":canvas-server:fixupMinecraftSourcePatches")
 }
+
+apply(from = "obsidian.gradle.kts")
