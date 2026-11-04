@@ -111,5 +111,5 @@ jobs:
           gh release create "$tag" "${jars[@]}" \
             --target "$full" \
             --title "Obsidian $tag" \
-            --notes "Automated build of $full (Minecraft $mc), run ${{ github.run_number }}." \r
+            --notes "Automated build of $full (Minecraft $mc), run ${{ github.run_number }}." \
             || gh release view "$tag"
