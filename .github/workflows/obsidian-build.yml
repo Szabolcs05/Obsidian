@@ -17,6 +17,10 @@ on:
         required: false
         default: false
 
+concurrency:
+  group: obsidian-build-${{ inputs.ref || github.sha }}
+  cancel-in-progress: false
+
 permissions:
   contents: write # needed by the release step; pull_request runs from forks get a read-only token regardless
 
@@ -103,7 +107,9 @@ jobs:
             echo "error: no paperclip jar found" >&2
             exit 1
           fi
+          # A parallel build of the same sha may win the race; then the release exists, which is fine.
           gh release create "$tag" "${jars[@]}" \
             --target "$full" \
             --title "Obsidian $tag" \
-            --notes "Automated build of $full (Minecraft $mc), run ${{ github.run_number }}."
+            --notes "Automated build of $full (Minecraft $mc), run ${{ github.run_number }}." \r
+            || gh release view "$tag"

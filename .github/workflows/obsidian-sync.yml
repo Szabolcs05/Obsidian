@@ -19,6 +19,7 @@ jobs:
     outputs:
       pushed: ${{ steps.push.outputs.pushed }}
       sha: ${{ steps.push.outputs.sha }}
+      has_pat: ${{ steps.token.outputs.has_pat }}
     steps:
       # SYNC_TOKEN is an optional PAT with `workflow` scope. GITHUB_TOKEN cannot push commits that touch
       # .github/workflows/*, which an upstream merge may contain.
@@ -28,6 +29,12 @@ jobs:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Detect SYNC_TOKEN
+        id: token
+        env:
+          HAS_PAT: ${{ secrets.SYNC_TOKEN != '' }}
+        run: echo "has_pat=$HAS_PAT" >> "$GITHUB_OUTPUT"
 
       - name: Configure Git
         run: |
@@ -129,7 +136,7 @@ jobs:
             reason="The merge of Canvas $SHA produced **merge conflicts**. The branch contains the conflicted merge commit; resolve the conflicts on it and merge the PR."
           elif [ "$PUSHED" = "false" ]; then
             git branch -f "$branch" HEAD
-            reason="Verification passed, but pushing the merge to \`main\` was rejected. This usually means the upstream changes touch \`.github/workflows/*\`, which \`GITHUB_TOKEN\` may not push. Add a \`SYNC_TOKEN\` repository secret (a PAT with \`workflow\` scope) for automatic syncs, or review and merge this PR manually."
+            reason="Verification passed, but the push to \`main\` was rejected: either the merge touches \`.github/workflows/*\` (which \`GITHUB_TOKEN\` may not push) or \`main\` moved during the run. Add a \`SYNC_TOKEN\` repository secret (a PAT with \`workflow\` scope) for automatic syncs, or review and merge this PR manually."
           else
             git branch -f "$branch" HEAD
             failed="an earlier step"
@@ -142,7 +149,11 @@ jobs:
 
           # upstream-sync/* is a bot-owned scratch branch that may linger from an earlier run, so a force
           # push is acceptable here. main is never force-pushed.
-          git push --force origin "refs/heads/$branch:refs/heads/$branch"
+          echo "::error::Upstream sync of Canvas $SHORT needs manual attention: $reason"
+          if ! git push --force origin "refs/heads/$branch:refs/heads/$branch"; then
+            echo "::error::Could not push $branch (most likely the merge touches .github/workflows/* and GITHUB_TOKEN may not push that). Add a SYNC_TOKEN repository secret (a PAT with workflow scope), or merge manually locally: git fetch upstream && bash scripts/obsidian/merge-upstream.sh upstream/main"
+            exit 1
+          fi
 
           existing="$(gh pr list --head "$branch" --state open --json number --jq 'length')"
           if [ "$existing" -eq 0 ]; then
@@ -161,7 +172,9 @@ jobs:
 
   build:
     needs: sync
-    if: ${{ needs.sync.outputs.pushed == 'true' }}
+    # With SYNC_TOKEN (a PAT) the push itself triggers obsidian-build.yml, so calling it here would build and
+    # release the same sha twice.
+    if: ${{ needs.sync.outputs.pushed == 'true' && needs.sync.outputs.has_pat != 'true' }}
     # Pushes made with GITHUB_TOKEN do not trigger other workflows, so build and release explicitly.
     permissions:
       contents: write
