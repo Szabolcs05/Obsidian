@@ -148,5 +148,23 @@ if [ "$RC" -eq 1 ] && grep -qi "identity" "$TMP/stderr" \
   pass "missing identity refused"
 else fail "missing identity (rc=$RC)"; fi
 
+# Case 10: usage error exits 64 (never 2, which the workflow reads as "conflict")
+OUT="$(cd "$TMP/c9-fork" && env -u GITHUB_OUTPUT bash "$SCRIPT" 2>"$TMP/stderr")"; RC=$?
+if [ "$RC" -eq 64 ] && grep -q "usage" "$TMP/stderr"; then
+  pass "usage error exits 64"
+else fail "usage error (rc=$RC)"; fi
+
+# Case 11: stable commit without mcVersion -> exit 1, nothing merged, no outputs
+new_pair c11
+printf 'group = io.canvasmc\nchannel = STABLE\n' > "$UP/gradle.properties"
+git -C "$UP" add -A; git -C "$UP" commit -q -m "drop mcVersion"
+before="$(git -C "$FORK" rev-parse HEAD)"
+run_merge
+if [ "$RC" -eq 1 ] && grep -q "mcVersion" "$TMP/stderr" && [ -z "$OUT" ] \
+   && [ "$(git -C "$FORK" rev-parse HEAD)" = "$before" ] \
+   && [ -z "$(git -C "$FORK" status --porcelain)" ]; then
+  pass "missing mcVersion refused"
+else fail "missing mcVersion (rc=$RC out='$OUT')"; fi
+
 [ "$fails" -eq 0 ] || { echo "$fails test(s) failed"; exit 1; }
 echo "All tests passed"

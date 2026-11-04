@@ -4,7 +4,7 @@
 #
 # Outputs key=value lines (to $GITHUB_OUTPUT if set, else stdout):
 #   status=up-to-date|merged|conflict, sha=<full>, short=<7>, mc=<mcVersion>
-# Exit codes: 0 up-to-date/merged, 2 conflict, 1 any other failure.
+# Exit codes: 0 up-to-date/merged, 2 conflict, 64 usage error, 1 any other failure.
 #
 # On conflict the checked-out branch is left untouched; the conflicted merge
 # commit lives only on branch upstream-sync/<short> (overwritten if present).
@@ -12,7 +12,7 @@ set -euo pipefail
 
 if [ $# -ne 1 ]; then
   echo "usage: $0 <upstream-ref>" >&2
-  exit 2
+  exit 64 # not 2: the sync workflow treats 2 as "conflict"
 fi
 ref="$1"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,8 +36,9 @@ orig="$(git symbolic-ref --short -q HEAD)" || die "HEAD is detached; check out a
 
 sha="$("$here/find-stable.sh" "$ref")" || die "could not determine a stable upstream commit from $ref"
 short="${sha:0:7}"
-mc="$(git show "$sha:gradle.properties" | tr -d '\r' \
-  | sed -n 's/^mcVersion[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1/p' | head -n1)"
+mc="$(git show "$sha:gradle.properties" 2>/dev/null | tr -d '\r' \
+  | sed -n 's/^mcVersion[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1/p' | head -n1)" || mc=""
+[ -n "$mc" ] || die "mcVersion is missing from gradle.properties at $sha"
 
 if git merge-base --is-ancestor "$sha" HEAD; then
   emit up-to-date

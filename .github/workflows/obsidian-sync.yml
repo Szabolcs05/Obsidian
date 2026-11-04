@@ -21,14 +21,15 @@ jobs:
       sha: ${{ steps.push.outputs.sha }}
       has_pat: ${{ steps.token.outputs.has_pat }}
     steps:
-      # SYNC_TOKEN is an optional PAT with `workflow` scope. GITHUB_TOKEN cannot push commits that touch
-      # .github/workflows/*, which an upstream merge may contain.
+      # Unreviewed upstream build code (Gradle) runs in this job, so no credentials are persisted in .git/config.
+      # Only the two steps that push ("Push main" and "Open sync PR") get a token, passed per command.
+      # SYNC_TOKEN is an optional PAT that can push .github/workflows/* changes, which GITHUB_TOKEN cannot.
       - name: Check out main
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       - name: Detect SYNC_TOKEN
         id: token
@@ -41,6 +42,7 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # Canvas is public; no token needed.
       - name: Fetch upstream Canvas
         run: |
           git remote add upstream https://github.com/CraftCanvasMC/Canvas.git
@@ -83,9 +85,19 @@ jobs:
             rebuildAllServerPatches \
             rebuildPaperApiPatches \
             rebuildPaperSingleFilePatches
-          if [ -n "$(git status --porcelain)" ]; then
-            git add -A
+          # Commit only the patch outputs; anything else the build leaves behind is not committed.
+          git add -A -- \
+            canvas-server/minecraft-patches \
+            canvas-server/paper-patches \
+            canvas-api/paper-patches \
+            canvas-server/build.gradle.kts.patch \
+            canvas-api/build.gradle.kts.patch
+          if ! git diff --cached --quiet; then
             git commit -m "chore: rebuild patches after Canvas $SHORT"
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::warning::Files outside the patch directories changed during the rebuild and were not committed:"
+            git status --porcelain
           fi
 
       - name: Run tests
@@ -103,8 +115,11 @@ jobs:
       - name: Push main
         id: push
         if: steps.merge.outputs.status == 'merged'
+        env:
+          TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          if git push origin main; then
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          if git -c http.https://github.com/.extraheader="$auth" push origin main; then
             echo "pushed=true" >> "$GITHUB_OUTPUT"
             echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           else
@@ -112,12 +127,14 @@ jobs:
           fi
 
       # Conflict, failed verification, or rejected push: park the merge on upstream-sync/<short>, open a PR
-      # (unless one is already open) and fail the job so the user is notified. main is never force-pushed.
+      # and fail the job so the user is notified. main is never force-pushed, and an existing
+      # upstream-sync/<short> branch is never overwritten (a human may be resolving on it).
       - name: Open sync PR
         if: ${{ always() && (steps.merge.outputs.status == 'conflict' || steps.push.outputs.pushed == 'false' || (failure() && steps.merge.outputs.status == 'merged')) }}
         env:
-          GH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           STATUS: ${{ steps.merge.outputs.status }}
           SHORT: ${{ steps.merge.outputs.short }}
           MC: ${{ steps.merge.outputs.mc }}
@@ -130,13 +147,18 @@ jobs:
         run: |
           set -euo pipefail
           branch="upstream-sync/$SHORT"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          redo="git fetch origin && git switch -c my-sync origin/main && git fetch upstream && bash scripts/obsidian/merge-upstream.sh upstream/main (see \"Resolving a sync PR locally\" in OBSIDIAN.md)"
 
+          draft=()
           if [ "$STATUS" = "conflict" ]; then
             # merge-upstream.sh already created this local branch holding the conflicted merge commit.
+            draft=(--draft)
             reason="The merge of Canvas $SHA produced **merge conflicts**. The branch contains the conflicted merge commit; resolve the conflicts on it and merge the PR."
           elif [ "$PUSHED" = "false" ]; then
             git branch -f "$branch" HEAD
-            reason="Verification passed, but the push to \`main\` was rejected: either the merge touches \`.github/workflows/*\` (which \`GITHUB_TOKEN\` may not push) or \`main\` moved during the run. Add a \`SYNC_TOKEN\` repository secret (a PAT with \`workflow\` scope) for automatic syncs, or review and merge this PR manually."
+            reason="Verification passed, but the push to \`main\` was rejected: either the merge touches \`.github/workflows/*\` (which \`GITHUB_TOKEN\` may not push) or \`main\` moved during the run. Add a \`SYNC_TOKEN\` repository secret (see OBSIDIAN.md) for automatic syncs, or review and merge this PR manually."
           else
             git branch -f "$branch" HEAD
             failed="an earlier step"
@@ -147,27 +169,53 @@ jobs:
             reason="The merge of Canvas $SHA applied cleanly, but verification failed at: **$failed**. \`main\` was left untouched."
           fi
 
-          # upstream-sync/* is a bot-owned scratch branch that may linger from an earlier run, so a force
-          # push is acceptable here. main is never force-pushed.
+          {
+            printf 'Automated upstream sync of Canvas `%s` (Minecraft %s).\n\n%s\n\n' "$SHORT" "$MC" "$reason"
+            printf 'Merge this PR with **Create a merge commit** (never squash or rebase). Squash and rebase drop the Canvas parent, so the same conflicts would come back on every sync.\n\n'
+            printf 'This PR was opened by the bot, so CI checks start after the first human push to the branch.\n\n'
+            printf 'Run: %s\n' "$run_url"
+          } > "$RUNNER_TEMP/pr-body.md"
+
+          # Echoes the URL of the open PR for $branch, creating the PR if none is open.
+          ensure_pr() {
+            local url
+            url="$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // empty')"
+            if [ -z "$url" ]; then
+              url="$(gh pr create \
+                --base main \
+                --head "$branch" \
+                --title "Sync Canvas $SHORT ($MC)" \
+                --body-file "$RUNNER_TEMP/pr-body.md" \
+                "${draft[@]}")"
+            fi
+            echo "$url"
+          }
+
           echo "::error::Upstream sync of Canvas $SHORT needs manual attention: $reason"
-          if ! git push --force origin "refs/heads/$branch:refs/heads/$branch"; then
-            echo "::error::Could not push $branch (most likely the merge touches .github/workflows/* and GITHUB_TOKEN may not push that). Add a SYNC_TOKEN repository secret (a PAT with workflow scope), or merge manually locally: git fetch upstream && bash scripts/obsidian/merge-upstream.sh upstream/main"
+
+          rc=0
+          git -c http.https://github.com/.extraheader="$auth" ls-remote --exit-code origin "refs/heads/$branch" >/dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            # The branch already exists: it may hold a human's in-progress resolution, so never push over it.
+            pr="$(ensure_pr)"
+            printf 'Upstream sync of Canvas `%s` is still pending. This run did **not** update `%s`, which already exists.\n\nReason from this run: %s\n\nRun: %s\n\nTo make the bot retry from scratch, delete the branch and close this PR.\n' \
+              "$SHORT" "$branch" "$reason" "$run_url" > "$RUNNER_TEMP/pr-comment.md"
+            gh pr comment "$pr" --body-file "$RUNNER_TEMP/pr-comment.md"
+            echo "::error::$branch already exists, so it was left untouched; see $pr."
+            exit 1
+          elif [ "$rc" -ne 2 ]; then
+            echo "::error::Could not check whether $branch exists on origin (git ls-remote exit $rc)."
             exit 1
           fi
 
-          existing="$(gh pr list --head "$branch" --state open --json number --jq 'length')"
-          if [ "$existing" -eq 0 ]; then
-            printf 'Automated upstream sync of Canvas `%s` (Minecraft %s).\n\n%s\n' "$SHORT" "$MC" "$reason" > "$RUNNER_TEMP/pr-body.md"
-            gh pr create \
-              --base main \
-              --head "$branch" \
-              --title "Sync Canvas $SHORT ($MC)" \
-              --body-file "$RUNNER_TEMP/pr-body.md"
-          else
-            echo "An open PR for $branch already exists."
+          # Plain push (never --force) of a branch that does not exist yet.
+          if ! git -c http.https://github.com/.extraheader="$auth" push origin "refs/heads/$branch:refs/heads/$branch"; then
+            echo "::error::Could not push $branch (most likely the merge touches .github/workflows/* and GITHUB_TOKEN may not push that, or the branch appeared meanwhile). Add a SYNC_TOKEN repository secret (see OBSIDIAN.md), or merge manually on a branch off origin/main: $redo"
+            exit 1
           fi
 
-          echo "::error::Upstream sync of Canvas $SHORT needs manual attention (see the PR from $branch)."
+          pr="$(ensure_pr)"
+          echo "::error::Upstream sync of Canvas $SHORT needs manual attention (see $pr)."
           exit 1
 
   build:

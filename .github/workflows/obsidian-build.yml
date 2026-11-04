@@ -94,6 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           mc="$(tr -d '\r' < gradle.properties | sed -n 's/^mcVersion[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*$/\1/p' | head -n1)"
+          [ -n "$mc" ] || { echo "::error::mcVersion missing"; exit 1; }
           full="$(git rev-parse HEAD)"
           short="$(git rev-parse --short=7 HEAD)"
           tag="${mc}-${short}"
