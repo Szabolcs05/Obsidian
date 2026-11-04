@@ -146,6 +146,7 @@ jobs:
           OUT_PAPERCLIP: ${{ steps.paperclip.outcome }}
         run: |
           set -euo pipefail
+          shopt -s inherit_errexit # a failing gh call inside $(ensure_pr) must fail the step
           branch="upstream-sync/$SHORT"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
