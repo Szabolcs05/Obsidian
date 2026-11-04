@@ -13,7 +13,7 @@ guide covers where Obsidian's own changes go and how to handle the sync.
 
 ## Patch workflow
 
-Same as Canvas and Paper; see [CONTRIBUTING.md](CONTRIBUTING.md) for the details. In short (Java 25 required):
+Same as Canvas and Paper; see the [Canvas developer docs](https://docs.canvasmc.io/canvas/developers/contributing/canvas/) for the details ([CONTRIBUTING.md](CONTRIBUTING.md) only covers pull request guidelines). In short (Java 25 required):
 
 1. `./gradlew applyAllPatches`
 2. Edit and commit inside the patched source repos.
@@ -32,8 +32,8 @@ Actions, using "workflow_dispatch".
    `-X theirs`.
 3. It applies patches, rebuilds them (committing any rebuild diff), then runs the tests and builds.
 4. Only if all of that passes is `main` pushed. The run then builds and publishes a GitHub Release tagged
-   `<mcVersion>-<short sha>`.
-5. If anything fails, it pushes branch `upstream-sync/<short>` and opens a PR "Sync Canvas <short> (<mc>)". The run
+   `<mcVersion>-<short sha>`, where the short sha is the Obsidian commit that was built.
+5. If anything fails, it pushes branch `upstream-sync/<short>` and opens a PR "Sync Canvas <short> (<mc>)". Here `<short>` is the Canvas commit, not an Obsidian one. The run
    fails so you get notified. `main` is untouched.
 
 ### Optional secret: SYNC_TOKEN
@@ -42,17 +42,30 @@ Actions, using "workflow_dispatch".
 `.github/workflows/*`, because `GITHUB_TOKEN` cannot push those changes. Without it, such syncs fail with an error
 telling you to merge manually.
 
+With `SYNC_TOKEN`, the push to `main` triggers `obsidian-build.yml` directly. Without it (pushes made with
+`GITHUB_TOKEN` do not trigger workflows), the sync workflow calls the build itself.
+
 ### Resolving a sync PR locally
 
-1. `git fetch origin upstream-sync/<short>` and check it out. Or redo the merge on a branch:
-   `git fetch upstream && bash scripts/obsidian/merge-upstream.sh upstream/main`.
+`merge-upstream.sh` merges into the currently checked-out branch, and only creates `upstream-sync/<short>` when there
+is a conflict. Which case you are in depends on the PR:
+
+**(a) Conflict PR.** The conflicted merge is on the pushed branch.
+
+1. `git fetch origin upstream-sync/<short>` and `git checkout -b upstream-sync/<short> FETCH_HEAD` (or `git switch`).
 2. Resolve the conflict markers, keeping Obsidian's code and Canvas's changes.
 3. `./gradlew applyAllPatches` and fix any patch failures.
 4. Rebuild the patches (command above), then run `./gradlew test`.
 5. Commit, push the branch and merge the PR.
 
-`README.md` is owned by Canvas, so it can conflict on merges. That is accepted: during sync conflicts, Obsidian's
-README wins.
+**(b) Verification-failure PR.** The clean merge is already on the pushed `upstream-sync/<short>`; check it out the
+same way as in (a) and fix whatever failed (apply, rebuild, tests or build), then commit, push and merge the PR.
+
+To redo the merge locally instead, never do it on `main`: first `git switch -c my-sync main`, then run
+`git fetch upstream && bash scripts/obsidian/merge-upstream.sh upstream/main`.
+
+`README.md` is owned by Canvas, so it can conflict on merges. That is accepted: when resolving conflicts, apply the
+rule manually that Obsidian's README wins.
 
 ## Other workflows
 

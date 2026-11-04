@@ -25,7 +25,7 @@ The jar is written to `canvas-server/build/libs/obsidian-paperclip-<version>.jar
 ## Contributing and maintenance
 
 See [OBSIDIAN.md](OBSIDIAN.md) for where Obsidian changes live, how the upstream sync works, and how to resolve a
-failed sync. The general patch workflow is described in [CONTRIBUTING.md](CONTRIBUTING.md).
+failed sync. The source and patch workflow is described in the [Canvas developer docs](https://docs.canvasmc.io/canvas/developers/contributing/canvas/); [CONTRIBUTING.md](CONTRIBUTING.md) holds the pull request guidelines.
 
 ## Credits and license
 
