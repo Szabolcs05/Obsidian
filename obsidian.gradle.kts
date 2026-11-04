@@ -20,7 +20,15 @@ project(":canvas-server").afterEvaluate {
 
     // The paperclip/bundler jar names are build/libs/<bundlerJarName>-paperclip-<version>.jar
     // (PaperclipTasks.jarName); bundlerJarName defaults to "paper".
-    extensions.configure<io.papermc.paperweight.core.extension.PaperweightCoreExtension> {
-        bundlerJarName.set("obsidian")
+    // Script plugins get their own classloader and cannot see paperweight classes, so go reflective.
+    val ext = extensions.findByName("paperweight")
+        ?: throw GradleException("obsidian.gradle.kts: extension 'paperweight' not found on ${path}")
+    val getter = try {
+        ext.javaClass.getMethod("getBundlerJarName")
+    } catch (e: NoSuchMethodException) {
+        throw GradleException("obsidian.gradle.kts: paperweight extension (${ext.javaClass.name}) has no getBundlerJarName(); paperweight API changed?", e)
     }
+    @Suppress("UNCHECKED_CAST")
+    val bundlerJarName = getter.invoke(ext) as org.gradle.api.provider.Property<String>
+    bundlerJarName.set("obsidian")
 }
