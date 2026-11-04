@@ -118,5 +118,35 @@ FORK="$TMP/c7b"
 OUT="$(cd "$FORK" && env -u GITHUB_OUTPUT bash "$SCRIPT" HEAD 2>"$TMP/stderr")"; RC=$?
 if [ "$RC" -eq 1 ] && [ -s "$TMP/stderr" ]; then pass "no stable commit exits 1"; else fail "no stable (rc=$RC)"; fi
 
+# Case 8: conflict + commit failure -> original branch restored, no MERGING state
+new_pair c8
+printf 'line1\nfork-edit\nline3\n' > "$FORK/shared.txt"
+git -C "$FORK" add -A; git -C "$FORK" commit -q -m "fork edit"
+printf 'line1\nupstream-edit\nline3\n' > "$UP/shared.txt"
+git -C "$UP" add -A; git -C "$UP" commit -q -m "upstream edit"
+main_before="$(git -C "$FORK" rev-parse HEAD)"
+git -C "$FORK" config commit.gpgsign true
+git -C "$FORK" config gpg.program /nonexistent/gpg
+run_merge
+if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ] \
+   && [ "$(git -C "$FORK" rev-parse HEAD)" = "$main_before" ] \
+   && [ "$(git -C "$FORK" symbolic-ref --short HEAD)" = "main" ] \
+   && [ -z "$(git -C "$FORK" status --porcelain)" ] \
+   && [ ! -e "$FORK/.git/MERGE_HEAD" ]; then
+  pass "commit failure on conflict path restores branch"
+else fail "commit failure (rc=$RC out='$OUT')"; fi
+
+# Case 9: missing git identity -> exit 1 before touching anything
+new_pair c9
+up_commit upstream-new.txt "x" "upstream change"
+git -C "$FORK" fetch -q origin
+git -C "$FORK" config --unset user.name; git -C "$FORK" config --unset user.email
+before="$(git -C "$FORK" rev-parse HEAD)"
+OUT="$(cd "$FORK" && env -u GITHUB_OUTPUT HOME="$TMP/nohome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 bash "$SCRIPT" origin/main 2>"$TMP/stderr")"; RC=$?
+if [ "$RC" -eq 1 ] && grep -qi "identity" "$TMP/stderr" \
+   && [ "$(git -C "$FORK" rev-parse HEAD)" = "$before" ]; then
+  pass "missing identity refused"
+else fail "missing identity (rc=$RC)"; fi
+
 [ "$fails" -eq 0 ] || { echo "$fails test(s) failed"; exit 1; }
 echo "All tests passed"

@@ -28,6 +28,9 @@ emit() { # status
   } >> "${GITHUB_OUTPUT:-/dev/stdout}"
 }
 
+git config user.name >/dev/null || die "git user.name is not set; configure a git identity first"
+git config user.email >/dev/null || die "git user.email is not set; configure a git identity first"
+
 orig="$(git symbolic-ref --short -q HEAD)" || die "HEAD is detached; check out a branch first"
 [ -z "$(git status --porcelain)" ] || die "working tree is not clean; refusing to merge"
 
@@ -42,25 +45,40 @@ if git merge-base --is-ancestor "$sha" HEAD; then
 fi
 
 pre="$(git rev-parse HEAD)"
+
+cleanup() {
+  trap - ERR INT TERM
+  git merge --abort 2>/dev/null || true
+  git checkout -q -f "$orig" 2>/dev/null || true
+  git reset -q --hard "$pre" 2>/dev/null || true
+  echo "error: merge script failed; restored $orig to $pre" >&2
+  exit 1
+}
+trap cleanup ERR INT TERM
 msg="Merge Canvas $short ($mc)"
 
 if git merge --no-ff --no-edit -m "$msg" "$sha" >&2; then
+  trap - ERR INT TERM
   emit merged
   exit 0
 fi
 
 # Merge failed: distinguish a real content conflict from other errors.
 if [ -z "$(git ls-files -u)" ]; then
-  git merge --abort 2>/dev/null || true
-  git reset -q --hard "$pre"
-  die "merge of $sha failed without conflicts"
+  echo "error: merge of $sha failed without conflicts" >&2
+  false
 fi
 
 branch="upstream-sync/$short"
+git merge --abort
+git checkout -q -B "$branch" "$pre"
+if git merge --no-ff --no-edit -m "$msg" "$sha" >&2; then
+  false
+fi
 git add -A
 git commit -q --no-verify -m "$msg [CONFLICTS]"
-git branch -f "$branch" HEAD
-git reset -q --hard "$pre"
+git checkout -q "$orig"
+trap - ERR INT TERM
 
 emit conflict
 exit 2
