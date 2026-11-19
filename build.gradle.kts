@@ -10,6 +10,7 @@ plugins {
 
 val paperMavenPublicUrl = "https://repo.papermc.io/repository/maven-public/"
 val canvasMavenPublicUrl = "https://maven.canvasmc.io/public/"
+val canvasPatchRouletteEndpoint = "https://patch-roulette.canvasmc.io/api"
 
 paperweight {
     filterPatches = false
@@ -76,7 +77,7 @@ subprojects {
     }
 
     tasks.withType<AbstractPatchRouletteTask>().configureEach {
-        endpoint = "https://patch-roulette.canvasmc.io/api"
+        endpoint = canvasPatchRouletteEndpoint
     }
 
     extensions.configure<PublishingExtension> {
@@ -116,4 +117,11 @@ tasks.register("fixupMinecraftFilePatches") {
     dependsOn(":canvas-server:fixupMinecraftSourcePatches")
 }
 
+<<<<<<< HEAD
 apply(from = "obsidian.gradle.kts")
+=======
+// paper-api patching is performed by the root project
+tasks.withType<AbstractPatchRouletteTask>().configureEach {
+    endpoint = canvasPatchRouletteEndpoint
+}
+>>>>>>> 3969b5f739b8c83e5f4a93df632b449c21bb22f9
